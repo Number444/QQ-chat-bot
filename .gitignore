@@ -1,0 +1,6 @@
+# NapCat 二进制/运行时一律不入库，只跟踪机器人本体
+*
+!.gitignore
+!README.md
+!bot.cjs
+!start-bot.bat
