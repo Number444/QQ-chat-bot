@@ -13,6 +13,23 @@ const LOG = 'D:\\Agent Space\\NapCatShell\\bot.log';
 const HISTORY_FILE = 'D:\\Agent Space\\NapCatShell\\history.json';
 const MAX_TURNS = 10; // 每个会话保留最近 10 轮问答，上下文硬性有界
 
+// headless 会话桶（bot 专用工作区，与 web GUI 会话物理隔离），用完自动清扫
+const SESSIONS_DIR = require('os').homedir() + '\\.dsh\\sessions\\--D-Agent~0020Space-NapCatShell--';
+const SESSION_TTL = 5 * 60 * 1000;
+function pruneSessions() {
+  try {
+    for (const name of fs.readdirSync(SESSIONS_DIR)) {
+      const p = require('path').join(SESSIONS_DIR, name);
+      try {
+        if (Date.now() - fs.statSync(p).mtimeMs > SESSION_TTL) {
+          fs.rmSync(p, { recursive: true, force: true });
+          log(`pruned session: ${name}`);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
 // 滚动会话记忆：key = private:<qq> / group:<群号>，重启不丢
 let history = {};
 try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch {}
@@ -61,7 +78,7 @@ async function askDsh(senderNick, text, scene, turns, fullAccess) {
     const p = spawn('C:\\Program Files\\nodejs\\node.exe', [
       'C:\\Users\\Administrator\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
       '--profile', 'headless', prompt,
-    ], { cwd: 'D:\\Agent Space', windowsHide: true });
+    ], { cwd: 'D:\\Agent Space\\NapCatShell', windowsHide: true });
     let out = '';
     const timer = setTimeout(() => { p.kill(); resolve('（艾薇思考超时了，稍后再试）'); }, DSH_TIMEOUT);
     p.stdout.on('data', (d) => out += d);
@@ -100,23 +117,26 @@ http.createServer((req, res) => {
     if (!text) return;
 
     const nick = (ev.sender && (ev.sender.card || ev.sender.nickname)) || String(ev.user_id);
+    const fromMaster = Number(ev.user_id) === MASTER_ID;
+    // 主人消息统一标注为 Four，避免模型认不出昵称 NUM IV
+    const label = fromMaster ? 'Four' : nick;
     log(`recv ${ev.message_type} from ${nick}(${ev.user_id}): ${text}`);
 
     enqueue(async () => {
-      const fromMaster = Number(ev.user_id) === MASTER_ID;
       const scene = isPrivate
         ? 'Four（你的主人）在私聊你'
         : fromMaster
-          ? 'Four（你的主人）在 QQ 群里 @了你'
+          ? 'Four（你的主人，QQ 昵称 NUM IV）在 QQ 群里 @了你，说话对象就是他本人'
           : `你在 QQ 群里被普通群成员 ${nick} @了`;
       const key = isPrivate ? `private:${ev.user_id}` : `group:${ev.group_id}`;
-      const reply = await askDsh(nick, text, scene, getTurns(key), fromMaster);
+      const reply = await askDsh(label, text, scene, getTurns(key), fromMaster);
       log(`reply: ${reply}`);
       const body = isPrivate
         ? { message_type: 'private', user_id: ev.user_id, message: reply }
         : { message_type: 'group', group_id: ev.group_id, message: reply };
       await sendMsg(body);
-      pushTurn(key, nick, text, reply);
+      pushTurn(key, label, text, reply);
+      pruneSessions();
     });
   });
 }).listen(PORT, '127.0.0.1', () => log(`bot listening on ${PORT}`));
