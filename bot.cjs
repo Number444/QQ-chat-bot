@@ -35,9 +35,10 @@ function extractText(messageArray) {
 async function askDsh(senderNick, text, scene) {
   const prompt = `你是艾薇，Four 的 AI 助手（你的身份、记忆与行事准则见全局 AGENTS.md）。你现在通过一个 QQ 机器人小号（昵称 IV）与人对话。场景：${scene}。要求：用简体中文回复；语气干练有温度，像真人聊天；回复要简短（一两句，别写小作文，别用 markdown 列表）；不知道的就直说不知道；直接输出回复正文，不要任何前缀解释。对方消息如下：\n${senderNick}：${text}`;
   return new Promise((resolve) => {
-    const p = spawn('cmd.exe', ['/c', 'dsh', '--profile', 'headless', prompt], {
-      cwd: 'D:\\Agent Space', windowsHide: true,
-    });
+    const p = spawn('C:\\Program Files\\nodejs\\node.exe', [
+      'C:\\Users\\Administrator\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+      '--profile', 'headless', prompt,
+    ], { cwd: 'D:\\Agent Space', windowsHide: true });
     let out = '';
     const timer = setTimeout(() => { p.kill(); resolve('（艾薇思考超时了，稍后再试）'); }, DSH_TIMEOUT);
     p.stdout.on('data', (d) => out += d);
