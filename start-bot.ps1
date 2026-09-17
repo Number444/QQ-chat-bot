@@ -12,11 +12,16 @@ if (-not (Get-Process dsh-app)) {
     Fail "未检测到 dsh-app 进程。`n请先启动桌面上的 dsh-app.exe"
 }
 
-# 2. 检查 dsh web 服务
+# 2. 检查 dsh web 服务（有 token 门禁：401/403 也算活着，只有连不上才算死）
+$dshAlive = $false
 try {
     $r = Invoke-WebRequest 'http://127.0.0.1:3080' -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -ne 200) { throw }
+    if ($r.StatusCode -eq 200) { $dshAlive = $true }
 } catch {
+    $code = $_.Exception.Response.StatusCode.value__
+    if ($code -in 401, 403) { $dshAlive = $true }
+}
+if (-not $dshAlive) {
     Fail "dsh web 服务（127.0.0.1:3080）无响应。`n请确认 dsh 已启动后再运行本脚本"
 }
 
