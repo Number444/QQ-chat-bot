@@ -8,7 +8,8 @@ const SELF_ID = 2721212523;
 const MASTER_ID = 2337529577;
 const ONEBOT = 'http://127.0.0.1:3000';
 const PORT = 3210;
-const DSH_TIMEOUT = 150000;
+const POLL = 150000;            // 150s 轮询判决间隔
+const MAX_TOTAL = 10 * 60000;   // 总时长硬上限 10 分钟，防失控
 const LOG = 'D:\\Agent Space\\NapCatShell\\bot.log';
 const HISTORY_FILE = 'D:\\Agent Space\\NapCatShell\\history.json';
 const MAX_TURNS = 10; // 每个会话保留最近 10 轮问答，上下文硬性有界
@@ -65,7 +66,7 @@ function extractText(messageArray) {
   return { text: parts.join('').trim(), atMe };
 }
 
-async function askDsh(senderNick, text, scene, turns, fullAccess) {
+async function askDsh(senderNick, text, scene, turns, fullAccess, onStatus) {
   const historyText = turns.length
     ? `\n以下是你们最近的对话记录（供你保持上下文连贯，不用复述）：\n` +
       turns.map(([n, u, b]) => `${n}：${u}\n你：${b}`).join('\n') + '\n'
@@ -80,11 +81,26 @@ async function askDsh(senderNick, text, scene, turns, fullAccess) {
       '--profile', 'headless', prompt,
     ], { cwd: 'D:\\Agent Space\\NapCatShell', windowsHide: true });
     let out = '';
-    const timer = setTimeout(() => { p.kill(); resolve('（艾薇思考超时了，稍后再试）'); }, DSH_TIMEOUT);
-    p.stdout.on('data', (d) => out += d);
-    p.stderr.on('data', () => {});
+    let lastActivity = Date.now();
+    const startedAt = lastActivity;
+    // 150s 轮询判决：stdout/stderr 有动静=活着，继续等并发状态消息；连续静默 150s=卡死，杀掉
+    p.stdout.on('data', (d) => { out += d; lastActivity = Date.now(); });
+    p.stderr.on('data', () => { lastActivity = Date.now(); }); // reasoning 流 = 思考活动
+    const timer = setInterval(() => {
+      const idle = Date.now() - lastActivity;
+      const totalSec = Math.round((Date.now() - startedAt) / 1000);
+      if (Date.now() - startedAt > MAX_TOTAL) {
+        clearInterval(timer); p.kill();
+        resolve('（艾薇这次任务太重，10 分钟还没跑完，先放弃了，拆小点再问我）');
+      } else if (idle >= POLL) {
+        clearInterval(timer); p.kill();
+        resolve('（艾薇卡住超过 150 秒没有任何动静，已放弃，换个问法试试）');
+      } else if (onStatus) {
+        onStatus(`还在处理中，已经用了 ${totalSec} 秒，再等会儿～`);
+      }
+    }, POLL);
     p.on('close', () => {
-      clearTimeout(timer);
+      clearInterval(timer);
       const clean = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
         .filter(s => !/^(dsh:|Node\.js|\[)/.test(s)).join(' ').trim();
       resolve(clean || '（艾薇没想好怎么回）');
@@ -129,12 +145,13 @@ http.createServer((req, res) => {
           ? 'Four（你的主人，QQ 昵称 NUM IV）在 QQ 群里 @了你，说话对象就是他本人'
           : `你在 QQ 群里被普通群成员 ${nick} @了`;
       const key = isPrivate ? `private:${ev.user_id}` : `group:${ev.group_id}`;
-      const reply = await askDsh(label, text, scene, getTurns(key), fromMaster);
+      const baseBody = isPrivate
+        ? { message_type: 'private', user_id: ev.user_id }
+        : { message_type: 'group', group_id: ev.group_id };
+      const onStatus = (s) => sendMsg({ ...baseBody, message: s }).catch(e => log('status send error: ' + e.message));
+      const reply = await askDsh(label, text, scene, getTurns(key), fromMaster, onStatus);
       log(`reply: ${reply}`);
-      const body = isPrivate
-        ? { message_type: 'private', user_id: ev.user_id, message: reply }
-        : { message_type: 'group', group_id: ev.group_id, message: reply };
-      await sendMsg(body);
+      await sendMsg({ ...baseBody, message: reply });
       pushTurn(key, label, text, reply);
       pruneSessions();
     });
