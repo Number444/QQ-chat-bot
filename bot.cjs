@@ -14,6 +14,10 @@ const MAX_TOTAL = 10 * 60000;   // 总时长硬上限 10 分钟，防失控
 const LOG = 'D:\\Agent Space\\NapCatShell\\bot.log';
 const SESSIONS_FILE = 'D:\\Agent Space\\NapCatShell\\sessions.json'; // 会话 key -> ACP sessionId
 const CWD = 'D:\\Agent Space\\NapCatShell';
+const GROUP_REFRESH = 6 * 3600 * 1000; // 群聊闲置超 6h 重建会话（防上下文积压）
+const WANT_MODEL = JSON.stringify(['kimi-coding', 'k3-256k']); // 期望模型（ACP model 选项值格式）
+const WANT_EFFORT = 'low';               // 期望推理强度
+const ACP_SESSIONS_DIR = 'C:\\Users\\Administrator\\.dsh\\sessions\\--D-Agent~0020Space-NapCatShell--';
 
 // ---------- 日志 ----------
 function log(s) {
@@ -105,33 +109,82 @@ function waitReady() {
 }
 
 // ---------- 会话管理：每个 QQ 会话一个持久 ACP session，重启可 resume ----------
+// sessions.json 形状：key -> { sid, last }；兼容旧格式 key -> "sid"
 let sessionMap = {};
 try { sessionMap = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8')); } catch {}
+// 旧格式迁移：字符串值包成对象，last 记为现在（避免启动即触发 6h 重建）
+{
+  let migrated = false;
+  for (const k of Object.keys(sessionMap)) {
+    if (typeof sessionMap[k] === 'string') { sessionMap[k] = { sid: sessionMap[k], last: Date.now() }; migrated = true; }
+  }
+  if (migrated) saveSessionMap();
+}
 function saveSessionMap() {
   try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessionMap), 'utf8'); } catch (e) { log('session map save error: ' + e.message); }
 }
 
+// 删除旧会话目录（防孤儿堆积）；严格校验：父目录对得上 + 名字是 UUID
+function removeSessionDir(sid) {
+  try {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) return;
+    const dir = require('path').join(ACP_SESSIONS_DIR, sid);
+    if (require('path').dirname(dir) !== ACP_SESSIONS_DIR) return;
+    fs.rmSync(dir, { recursive: true, force: true });
+    log(`removed old session dir ${sid}`);
+  } catch (e) { log('remove session dir error: ' + e.message); }
+}
+
+// 启动自检：会话的模型/推理强度不符合期望时，用 set_config_option 当场纠正
+async function ensureModel(sessionId, configOptions) {
+  try {
+    const opts = (configOptions || []).reduce((m, o) => (m[o.id] = o, m), {});
+    const model = opts['model'];
+    if (model && model.currentValue !== WANT_MODEL) {
+      await acpRequest('session/set_config_option', { sessionId, configId: 'model', value: WANT_MODEL });
+      log(`session ${sessionId} model corrected: ${model.currentValue} -> ${WANT_MODEL}`);
+    }
+    const eff = opts['reasoning_effort'];
+    if (eff && eff.currentValue !== WANT_EFFORT) {
+      await acpRequest('session/set_config_option', { sessionId, configId: 'reasoning_effort', value: WANT_EFFORT });
+      log(`session ${sessionId} reasoning effort corrected: ${eff.currentValue} -> ${WANT_EFFORT}`);
+    }
+  } catch (e) { log('ensureModel error: ' + e.message); } // 纠正失败不阻塞聊天
+}
+
 async function getSession(key) {
-  const old = sessionMap[key];
+  const entry = sessionMap[key];
+  const old = entry && entry.sid;
   if (old) {
-    try {
-      await acpRequest('session/resume', { sessionId: old, cwd: CWD, mcpServers: [] });
-      return old;
-    } catch (e) {
-      if (e.message.includes('already active')) return old; // 同进程内会话本来就活着，直接用
-      if (e.message.includes('not found') || e.message.includes('Not Found')) {
-        delete sessionMap[key]; saveSessionMap(); // 会话文件已被删，静默重建
-      } else {
-        log(`resume ${key} -> ${old} 失败（${e.message}），改新建`);
-        delete sessionMap[key];
-        saveSessionMap();
+    // 群聊专属：闲置超 6h 直接重建（私聊不受影响）
+    if (key.startsWith('group:') && Date.now() - (entry.last || 0) > GROUP_REFRESH) {
+      log(`group session ${old} idle > 6h，重建`);
+      try { await acpRequest('session/close', { sessionId: old }); } catch {}
+      removeSessionDir(old);
+      delete sessionMap[key];
+      saveSessionMap();
+    } else {
+      try {
+        const r = await acpRequest('session/resume', { sessionId: old, cwd: CWD, mcpServers: [] });
+        await ensureModel(old, r && r.configOptions);
+        return old;
+      } catch (e) {
+        if (e.message.includes('already active')) return old; // 同进程内会话本来就活着，直接用（模型此前已校正过）
+        if (e.message.includes('not found') || e.message.includes('Not Found')) {
+          delete sessionMap[key]; saveSessionMap(); // 会话文件已被删，静默重建
+        } else {
+          log(`resume ${key} -> ${old} 失败（${e.message}），改新建`);
+          delete sessionMap[key];
+          saveSessionMap();
+        }
       }
     }
   }
   const s = await acpRequest('session/new', { cwd: CWD, mcpServers: [] });
-  sessionMap[key] = s.sessionId;
+  sessionMap[key] = { sid: s.sessionId, last: Date.now() };
   saveSessionMap();
   log(`new session ${key} -> ${s.sessionId}`);
+  await ensureModel(s.sessionId, s.configOptions);
   return s.sessionId;
 }
 
@@ -284,6 +337,8 @@ http.createServer((req, res) => {
 
       await waitReady();
       const sessionId = await getSession(key);
+      sessionMap[key].last = Date.now(); // 记录本次活跃时间，供 6h 闲置判定
+      saveSessionMap();
       const reply = await askDsh(sessionId, prompt, onStatus);
       log(`reply: ${reply}`);
       await sendMsg({ ...baseBody, message: reply });
