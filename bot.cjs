@@ -8,7 +8,8 @@ const SELF_ID = 2721212523;
 const MASTER_ID = 2337529577;
 const ONEBOT = 'http://127.0.0.1:3000';
 const PORT = 3210;
-const POLL = 150000;            // 150s 轮询判决间隔
+const CHECK = 15000;            // 15s 检查间隔（与判定阈值解耦）
+const IDLE_LIMIT = 150000;      // 无工具在飞时，连续静默 150s 判卡死
 const MAX_TOTAL = 10 * 60000;   // 总时长硬上限 10 分钟，防失控
 const LOG = 'D:\\Agent Space\\NapCatShell\\bot.log';
 const SESSIONS_FILE = 'D:\\Agent Space\\NapCatShell\\sessions.json'; // 会话 key -> ACP sessionId
@@ -88,7 +89,7 @@ function acpRequest(method, params) {
 }
 
 function acpNotify(method, params) {
-  if (!acp || acp.exitCode === null) acp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+  if (acp && acp.exitCode === null) acp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
 }
 
 function waitReady() {
@@ -150,11 +151,19 @@ function extractText(messageArray) {
   return { text: parts.join('').trim(), atMe };
 }
 
-// ---------- 向 ACP session 提问（带 150s 轮询判决 + 状态播报） ----------
+// ---------- 向 ACP session 提问（15s 检查 / 150s 闲置判决 / 工具在飞豁免 / 状态播报） ----------
 async function askDsh(sessionId, promptText, onStatus) {
   let reply = '';
   let lastActivity = Date.now();
   const startedAt = lastActivity;
+  const toolsInFlight = new Map(); // toolCallId -> {title, since}；工具执行期间 ACP 无 update，不计闲置
+  let lastStatusAt = startedAt;  // 状态播报节流（首条播报不早于启动后 60s）
+
+  // 超时被取消时：已有部分内容照发，标注中断；没内容才用兜底文案
+  const cutoff = (fallback) => {
+    const partial = reply.trim();
+    return partial ? partial + '（后面超时中断了）' : fallback;
+  };
 
   return new Promise((resolve) => {
     let done = false;
@@ -170,27 +179,50 @@ async function askDsh(sessionId, promptText, onStatus) {
       sessionId,
       onActivity: (update) => {
         lastActivity = Date.now();
-        if (update && update.sessionUpdate === 'agent_message_chunk' && update.content && update.content.type === 'text') {
+        if (!update) return;
+        if (update.sessionUpdate === 'agent_message_chunk' && update.content && update.content.type === 'text') {
           reply += update.content.text;
+        } else if (update.sessionUpdate === 'tool_call' && update.toolCallId) {
+          const title = update.title || '命令';
+          toolsInFlight.set(update.toolCallId, { title, since: Date.now() });
+          // 调用工具时立刻冒个泡（10s 节流防刷屏），避免看起来一直没动
+          const now = Date.now();
+          if (onStatus && now - lastStatusAt >= 10000) {
+            lastStatusAt = now;
+            onStatus(`我在调用「${title}」，稍等～`);
+          }
+        } else if (update.sessionUpdate === 'tool_call_update' && update.toolCallId) {
+          const s = update.status;
+          if (s === 'completed' || s === 'failed' || s === 'cancelled') toolsInFlight.delete(update.toolCallId);
         }
       },
       onDead: () => finish(reply.trim() || '（艾薇的大脑进程重启了，这条消息没处理完，再发一次试试）'),
     };
 
-    // 150s 轮询判决：session/update 有动静=活着，发状态消息；连续静默 150s=卡死，取消
+    // 15s 检查一次：有工具在飞=活着（只受 10 分钟总时限约束）；无任何动静超 150s=卡死，取消
     const timer = setInterval(() => {
-      const idle = Date.now() - lastActivity;
-      const totalSec = Math.round((Date.now() - startedAt) / 1000);
-      if (Date.now() - startedAt > MAX_TOTAL) {
+      const now = Date.now();
+      const idle = now - lastActivity;
+      const totalSec = Math.round((now - startedAt) / 1000);
+      if (now - startedAt > MAX_TOTAL) {
         acpNotify('session/cancel', { sessionId });
-        finish('（艾薇这次任务太重，10 分钟还没跑完，先放弃了，拆小点再问我）');
-      } else if (idle >= POLL) {
+        finish(cutoff('（艾薇这次任务太重，10 分钟还没跑完，先放弃了，拆小点再问我）'));
+      } else if (toolsInFlight.size > 0) {
+        // 工具在飞：不算闲置，只每 60s 播报一次当前在跑什么
+        if (onStatus && now - lastStatusAt >= 60000) {
+          lastStatusAt = now;
+          const [, t] = toolsInFlight.entries().next().value;
+          onStatus(`正在执行「${t.title}」，已经跑了 ${Math.round((now - t.since) / 1000)} 秒，再等会儿～`);
+        }
+      } else if (idle >= IDLE_LIMIT) {
         acpNotify('session/cancel', { sessionId });
-        finish('（艾薇卡住超过 150 秒没有任何动静，已放弃，换个问法试试）');
-      } else if (onStatus) {
+        finish(cutoff('（艾薇卡住超过 150 秒没有任何动静，已放弃，换个问法试试）'));
+      } else if (onStatus && now - lastStatusAt >= 120000) {
+        // 思考/输出间隙：每 120s 报一次还活着
+        lastStatusAt = now;
         onStatus(`还在处理中，已经用了 ${totalSec} 秒，再等会儿～`);
       }
-    }, POLL);
+    }, CHECK);
 
     acpRequest('session/prompt', {
       sessionId,
