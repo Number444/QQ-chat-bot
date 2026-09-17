@@ -3,6 +3,7 @@
 const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 
 const SELF_ID = 2721212523;
 const MASTER_ID = 2337529577;
@@ -111,7 +112,8 @@ function waitReady() {
 // ---------- 会话管理：每个 QQ 会话一个持久 ACP session，重启可 resume ----------
 // sessions.json 形状：key -> { sid, last }；兼容旧格式 key -> "sid"
 let sessionMap = {};
-try { sessionMap = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8')); } catch {}
+let sessionsFileOk = false; // 映射文件是否成功解析（janitor 安全闸）
+try { sessionMap = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8')); sessionsFileOk = true; } catch {}
 // 旧格式迁移：字符串值包成对象，last 记为现在（避免启动即触发 6h 重建）
 {
   let migrated = false;
@@ -128,11 +130,33 @@ function saveSessionMap() {
 function removeSessionDir(sid) {
   try {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) return;
-    const dir = require('path').join(ACP_SESSIONS_DIR, sid);
-    if (require('path').dirname(dir) !== ACP_SESSIONS_DIR) return;
+    const dir = path.join(ACP_SESSIONS_DIR, sid);
+    if (path.dirname(dir) !== ACP_SESSIONS_DIR) return;
     fs.rmSync(dir, { recursive: true, force: true });
     log(`removed old session dir ${sid}`);
   } catch (e) { log('remove session dir error: ' + e.message); }
+}
+
+// 启动 janitor：清理不在映射里的孤儿会话目录（撞锁重建/异常残留）
+// 安全闸：sessions.json 必须成功解析（映射异常时绝不动手）；1h 内动过的目录不碰
+function janitor() {
+  if (!sessionsFileOk) return log('janitor skipped: sessions.json 缺失或损坏');
+  let removed = 0;
+  try {
+    const live = new Set(Object.values(sessionMap).map(e => e && e.sid).filter(Boolean));
+    for (const name of fs.readdirSync(ACP_SESSIONS_DIR)) {
+      if (live.has(name)) continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name)) continue;
+      const dir = path.join(ACP_SESSIONS_DIR, name);
+      try {
+        if (Date.now() - fs.statSync(dir).mtimeMs < 3600000) continue;
+        fs.rmSync(dir, { recursive: true, force: true });
+        removed++;
+        log(`janitor removed orphan session dir ${name}`);
+      } catch (e) { log(`janitor skip ${name}: ${e.message}`); }
+    }
+  } catch (e) { log('janitor error: ' + e.message); }
+  if (!removed) log('janitor: 无孤儿会话目录');
 }
 
 // 启动自检：会话的模型/推理强度不符合期望时，用 set_config_option 当场纠正
@@ -206,17 +230,29 @@ function extractText(messageArray) {
 
 // ---------- 向 ACP session 提问（15s 检查 / 150s 闲置判决 / 工具在飞豁免 / 状态播报） ----------
 async function askDsh(sessionId, promptText, onStatus) {
-  let reply = '';
+  let seg = '';                // 当前 assistant 消息段（按 messageId 分段，段满立即单独发出）
+  let curMsgId = null;
+  let sentAny = false;         // 本轮是否已分段发出过内容（决定兜底文案与最终是否再发）
   let lastActivity = Date.now();
   const startedAt = lastActivity;
   const toolsInFlight = new Map(); // toolCallId -> {title, since}；工具执行期间 ACP 无 update，不计闲置
   const toolCounts = new Map();    // title -> 次数，本轮调用过的工具汇总（用于 150s 大致提醒）
   let lastStatusAt = startedAt;  // 状态播报节流
 
+  // 段界处把已满的一段立即作为独立气泡发出（还原 agent 的分段输出）
+  const flushSeg = () => {
+    const t = seg.trim();
+    if (t && onStatus) { onStatus(t); sentAny = true; }
+    seg = '';
+  };
+
+  const toolSummary = () => [...toolCounts.entries()].map(([t, c]) => c > 1 ? `${t}×${c}` : t).join('、');
+
   // 超时被取消时：已有部分内容照发，标注中断；没内容才用兜底文案
   const cutoff = (fallback) => {
-    const partial = reply.trim();
-    return partial ? partial + '（后面超时中断了）' : fallback;
+    const partial = seg.trim();
+    if (partial) return partial + '（后面超时中断了）';
+    return sentAny ? '（艾薇超时中断了，上面是已经发出的部分）' : fallback;
   };
 
   return new Promise((resolve) => {
@@ -235,7 +271,9 @@ async function askDsh(sessionId, promptText, onStatus) {
         lastActivity = Date.now();
         if (!update) return;
         if (update.sessionUpdate === 'agent_message_chunk' && update.content && update.content.type === 'text') {
-          reply += update.content.text;
+          if (update.messageId && curMsgId && update.messageId !== curMsgId) flushSeg();
+          if (update.messageId) curMsgId = update.messageId;
+          seg += update.content.text;
         } else if (update.sessionUpdate === 'tool_call' && update.toolCallId) {
           const title = update.title || '命令';
           toolsInFlight.set(update.toolCallId, { title, since: Date.now() });
@@ -245,7 +283,7 @@ async function askDsh(sessionId, promptText, onStatus) {
           if (s === 'completed' || s === 'failed' || s === 'cancelled') toolsInFlight.delete(update.toolCallId);
         }
       },
-      onDead: () => finish(reply.trim() || '（艾薇的大脑进程重启了，这条消息没处理完，再发一次试试）'),
+      onDead: () => finish(seg.trim() || (sentAny ? '' : '（艾薇的大脑进程重启了，这条消息没处理完，再发一次试试）')),
     };
 
     // 15s 检查一次：有工具在飞=活着（只受 10 分钟总时限约束）；无任何动静超 150s=卡死，取消
@@ -260,16 +298,17 @@ async function askDsh(sessionId, promptText, onStatus) {
         // 工具在飞：不算闲置；每 150s 发一次「已调用过哪些工具」的大致提醒，不逐条刷屏
         if (onStatus && now - lastStatusAt >= 150000) {
           lastStatusAt = now;
-          const used = [...toolCounts.entries()].map(([t, c]) => c > 1 ? `${t}×${c}` : t).join('、');
-          onStatus(`还在弄，已经调用了这些工具：${used}，再等会儿～`);
+          onStatus(`还在弄，已经调用了这些工具：${toolSummary()}，再等会儿～`);
         }
       } else if (idle >= IDLE_LIMIT) {
         acpNotify('session/cancel', { sessionId });
         finish(cutoff('（艾薇卡住超过 150 秒没有任何动静，已放弃，换个问法试试）'));
       } else if (onStatus && now - lastStatusAt >= 150000) {
-        // 思考/输出间隙：每 150s 报一次还活着
+        // 思考/输出间隙：每 150s 报一次还活着；本轮用过工具就附带上工具汇总
         lastStatusAt = now;
-        onStatus(`还在处理中，已经用了 ${totalSec} 秒，再等会儿～`);
+        onStatus(toolCounts.size > 0
+          ? `还在弄，已经调用了这些工具：${toolSummary()}，再等会儿～`
+          : `还在处理中，已经用了 ${totalSec} 秒，再等会儿～`);
       }
     }, CHECK);
 
@@ -277,10 +316,10 @@ async function askDsh(sessionId, promptText, onStatus) {
       sessionId,
       prompt: [{ type: 'text', text: promptText }],
     }).then(() => {
-      finish(reply.trim() || '（艾薇没想好怎么回）');
+      finish(seg.trim() || (sentAny ? '' : '（艾薇没想好怎么回）'));
     }).catch((e) => {
       log('prompt error: ' + e.message);
-      finish(reply.trim() || '（艾薇出错了：' + e.message.slice(0, 100) + '）');
+      finish(seg.trim() || (sentAny ? '' : '（艾薇出错了：' + e.message.slice(0, 100) + '）'));
     });
   });
 }
@@ -337,9 +376,10 @@ http.createServer((req, res) => {
       saveSessionMap();
       const reply = await askDsh(sessionId, prompt, onStatus);
       log(`reply: ${reply}`);
-      await sendMsg({ ...baseBody, message: reply });
+      if (reply) await sendMsg({ ...baseBody, message: reply }); // 为空说明各段已实时发出
     });
   });
 }).listen(PORT, '127.0.0.1', () => log(`bot listening on ${PORT}`));
 
+janitor(); // 先清孤儿会话目录，再拉 ACP
 acpSpawn();
