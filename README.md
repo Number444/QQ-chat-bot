@@ -34,7 +34,9 @@ QQ 消息 ──(NapCat / OneBot 11, :3000)──> bot.cjs webhook (:3210)
 - **分段回复**：按 assistant messageId 分段，每段立即作为独立气泡发出
 - **模型自检**：每次 resume/new 校验模型与推理强度，不符则用 `session/set_config_option` 当场纠正
 - **群聊 6h 闲置重建**：防上下文积压产生巨额读入费用；私聊不受影响
-- **启动 janitor**：清理无映射的孤儿 session 目录（UUID 校验 + 1h 宽限 + 映射损坏时罢工）
+- **启动 janitor + 每小时扫描**：清理无映射的孤儿 session 目录（UUID 校验 + 1h 宽限 + 映射损坏时罢工）
+- **`.scratch` 草稿目录**：agent 临时文件的指定堆放点（提示词约定），仅启动时清空
+- **重启不清会话**：session 持久化跨重启，只有 6h 闲置 / resume 失败 / 手动删除才重置
 - **NapCat 心跳殉葬**：60s 探测 `get_login_info`，连续 3 次失败则带走 ACP 子进程退出
 - **发本机文件**：主人会话中输出 `[发送文件]绝对路径[/发送文件]`；图片/视频/语音走消息段直接显示，其他类型走 `upload_group_file` / `upload_private_file`；绝对路径 + 存在性 + 50MB 校验
 
