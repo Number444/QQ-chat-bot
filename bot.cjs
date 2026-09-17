@@ -210,7 +210,8 @@ async function askDsh(sessionId, promptText, onStatus) {
   let lastActivity = Date.now();
   const startedAt = lastActivity;
   const toolsInFlight = new Map(); // toolCallId -> {title, since}；工具执行期间 ACP 无 update，不计闲置
-  let lastStatusAt = startedAt;  // 状态播报节流（首条播报不早于启动后 60s）
+  const toolCounts = new Map();    // title -> 次数，本轮调用过的工具汇总（用于 150s 大致提醒）
+  let lastStatusAt = startedAt;  // 状态播报节流
 
   // 超时被取消时：已有部分内容照发，标注中断；没内容才用兜底文案
   const cutoff = (fallback) => {
@@ -238,12 +239,7 @@ async function askDsh(sessionId, promptText, onStatus) {
         } else if (update.sessionUpdate === 'tool_call' && update.toolCallId) {
           const title = update.title || '命令';
           toolsInFlight.set(update.toolCallId, { title, since: Date.now() });
-          // 调用工具时立刻冒个泡（10s 节流防刷屏），避免看起来一直没动
-          const now = Date.now();
-          if (onStatus && now - lastStatusAt >= 10000) {
-            lastStatusAt = now;
-            onStatus(`我在调用「${title}」，稍等～`);
-          }
+          toolCounts.set(title, (toolCounts.get(title) || 0) + 1);
         } else if (update.sessionUpdate === 'tool_call_update' && update.toolCallId) {
           const s = update.status;
           if (s === 'completed' || s === 'failed' || s === 'cancelled') toolsInFlight.delete(update.toolCallId);
@@ -261,17 +257,17 @@ async function askDsh(sessionId, promptText, onStatus) {
         acpNotify('session/cancel', { sessionId });
         finish(cutoff('（艾薇这次任务太重，10 分钟还没跑完，先放弃了，拆小点再问我）'));
       } else if (toolsInFlight.size > 0) {
-        // 工具在飞：不算闲置，只每 60s 播报一次当前在跑什么
-        if (onStatus && now - lastStatusAt >= 60000) {
+        // 工具在飞：不算闲置；每 150s 发一次「已调用过哪些工具」的大致提醒，不逐条刷屏
+        if (onStatus && now - lastStatusAt >= 150000) {
           lastStatusAt = now;
-          const [, t] = toolsInFlight.entries().next().value;
-          onStatus(`正在执行「${t.title}」，已经跑了 ${Math.round((now - t.since) / 1000)} 秒，再等会儿～`);
+          const used = [...toolCounts.entries()].map(([t, c]) => c > 1 ? `${t}×${c}` : t).join('、');
+          onStatus(`还在弄，已经调用了这些工具：${used}，再等会儿～`);
         }
       } else if (idle >= IDLE_LIMIT) {
         acpNotify('session/cancel', { sessionId });
         finish(cutoff('（艾薇卡住超过 150 秒没有任何动静，已放弃，换个问法试试）'));
-      } else if (onStatus && now - lastStatusAt >= 120000) {
-        // 思考/输出间隙：每 120s 报一次还活着
+      } else if (onStatus && now - lastStatusAt >= 150000) {
+        // 思考/输出间隙：每 150s 报一次还活着
         lastStatusAt = now;
         onStatus(`还在处理中，已经用了 ${totalSec} 秒，再等会儿～`);
       }
