@@ -1,7 +1,15 @@
-# NapCat 二进制/运行时一律不入库，只跟踪机器人本体
+# NapCat 二进制/运行时一律不入库，只跟踪机器人本体（白名单制）
+# secrets.json / state/ / logs/ / memes/ / bot.log 天然被 * 排除，切勿加白名单
 *
 !.gitignore
 !README.md
+!操作手册.md
+!PLAN.md
+!persona.md
+!config.json
 !bot.cjs
-!start-bot.bat
-!start-bot.ps1
+!bot-legacy.cjs
+!controller.cjs
+!watchdog.ps1
+!tray.ps1
+!KillQQ.bat

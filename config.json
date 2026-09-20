@@ -1,0 +1,66 @@
+{
+  "group": 985100027,
+  "botQQ": 2721212523,
+  "masterQQ": 2337529577,
+
+  "onebot": {
+    "http": "http://127.0.0.1:3000",
+    "webhookPort": 3210
+  },
+  "controllerPort": 3211,
+
+  "llm": {
+    "endpoint": "https://opencode.ai/zen/go/v1/chat/completions",
+    "primary": "deepseek-v4.1-flash",
+    "fallback": "longcat-2.0",
+    "session": "qq-group-985100027",
+    "temperature": 0.9,
+    "maxTokens": 300,
+    "timeoutMs": 30000,
+    "failoverAfter": 3,
+    "backoffMs": [10000, 60000, 300000]
+  },
+
+  "behavior": {
+    "bufferSize": 75,
+    "summaryEvery": 75,
+    "summaryMaxChars": 800,
+    "memoryMaxChars": 800,
+    "cooldownMinMs": 5000,
+    "cooldownMaxMs": 60000,
+    "silenceMs": 20000,
+    "silenceMinMsgs": 2,
+    "unansweredPauseMs": 120000,
+    "waitMinMs": 1000,
+    "waitMaxMs": 10000,
+    "bubbleGapMinMs": 500,
+    "bubbleGapMaxMs": 2000,
+    "bubbleMaxChars": 40,
+    "dedupWindowMs": 300000,
+    "atThrottlePerPerson": 10,
+    "atThrottleWindowMs": 1800000
+  },
+
+  "cost": {
+    "monthlyBudgetUSD": 60,
+    "window5hHalveAtUSD": 7,
+    "window5hAtOnlyAtUSD": 9.5,
+    "dailyCallCap": 200,
+    "pricePer1M": {
+      "deepseek-v4.1-flash": { "inOffPeak": 0.15, "inPeak": 0.30, "outOffPeak": 0.60, "outPeak": 1.20, "cacheRead": 0.003 },
+      "longcat-2.0": { "in": 0.30, "out": 1.20, "cacheRead": 0.006 }
+    },
+    "peakHoursUTC": [[1, 4], [6, 10]]
+  },
+
+  "meme": {
+    "maxCount": 500,
+    "catalogInject": 40,
+    "dir": "memes"
+  },
+
+  "sentLog": {
+    "dir": "logs/sent",
+    "retainDays": 7
+  }
+}
