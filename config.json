@@ -15,7 +15,7 @@
     "fallback": "longcat-2.0",
     "session": "qq-group-985100027",
     "temperature": 0.9,
-    "maxTokens": 300,
+    "maxTokens": 10000,
     "timeoutMs": 30000,
     "failoverAfter": 3,
     "backoffMs": [10000, 60000, 300000]

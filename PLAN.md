@@ -254,10 +254,11 @@ user:   【群聊记录(最近75条)】...[HH:mm] 昵称: 内容...\n【你的�
 ## 8. tray.ps1 设计
 
 - 控制器 `tray` 命令派生：`powershell -WindowStyle Hidden -File tray.ps1 -ControllerPid <pid>`
-- 控制器启动时用 `process.title = 'QQ机器人控制器'` 设置窗口标题
-- tray.ps1 通过 user32 `FindWindow("ConsoleWindowClass", "QQ机器人控制器")` 定位窗口 + `ShowWindow(SW_HIDE)` 隐藏
-  - **审查修正**：不用 `MainWindowHandle`——控制台窗口属于 conhost.exe 而非 node 进程，MainWindowHandle 常为 0；FindWindow 按窗口类+标题才可靠
-- WinForms NotifyIcon：图标用 NapCat 目录现成 ico 或系统默认；双击 → SW_SHOW 还原并自杀；右键菜单：还原 / 停止并退出（向控制器锁端口 3211 发约定文本 `STOP_AND_QUIT`，控制器收到后执行 stop+quit）
+- 控制器启动时用 `process.title = 'QQ机器人控制器'` 设置窗口标题（仅作聊胜于无的标识，定位不依赖它）
+- tray.ps1 v2 定位窗口：**查 TCP 3211 监听者拿控制器 pid → `AttachConsole(pid)` + `GetConsoleWindow()` 直取控制台窗口句柄** → `ShowWindow(SW_HIDE)` 隐藏
+  - **v1.5 修正**：弃用 `FindWindow("ConsoleWindowClass", 标题)`——实测提权启动的 node 控制台**标题为空**（process.title 被 RunAs 流程吞掉），FindWindow 永远找不到；AttachConsole 路径与标题/类名/可见性完全无关，才是可靠解
+  - 注意副作用：AttachConsole 后本进程 stdout 会指向目标控制台，诊断输出必须写文件
+- WinForms NotifyIcon：图标用系统默认；双击 → SW_RESTORE 还原；右键菜单：还原 / 停止并退出（向控制器锁端口 3211 发约定文本 `STOP_AND_QUIT`，控制器收到后执行 stop+quit）；3 秒定时器发现窗口消失则退出托盘进程
 - 看门狗继续生效：托盘中控制器被杀同样触发清理
 
 ## 9. persona.md 设计方向（草稿在开发第一步提交 Four 审）
@@ -308,3 +309,4 @@ user:   【群聊记录(最近75条)】...[HH:mm] 昵称: 内容...\n【你的�
 - v1.2 2026-09-18 Four 修订 7 点：①删除作息，活跃时段由 Four 手动控制；②冷却改 5s~2min，发言后 2 分钟无人接话则暂停候选直到有人说话；③缓冲 50→75 条，滚动摘要改为每 75 条新消息压缩一次；④预留 longcat-2.0 为备用/替换模型（config 双模型 + 自动故障切换）；⑤放弃重度拟人演出，气泡快速连发，文本风格去 AI 腔细则化（短句/网用语/禁总结腔/代码去重兜底）；⑥等待时间改 1~10 秒；⑦新增发言强制存档 logs/sent/按天 JSONL + 启动清理 7 天前残留
 - v1.3 2026-09-18 表情包库提前到 v1（Four 拍板）：群图白嫖收集 → V4.1 Flash 多模态打标（已实测该模型支持图像输入，无需 vision-exp）→ 文件名即备注 + index.json → 决策 JSON 支持 meme 气泡 + 小黄脸 face 占位符；敏感图即删、普通照片不入库、库上限 500 张淘汰制；master 加 /表情 命令
 - v1.4 2026-09-18 终审修正 5 处：①§1 目标句残留"有作息"与 v1.2 矛盾，删除；②45 秒静默触发补"skip 后需新消息重新武装"，防空转白调 LLM；③表情下载失败/打标失败只跳过该图，不阻塞管线、不触发模型 fallback 误切换；④控制器启动时检测到 bot 已在运行也立即武装看门狗，保证 X=stop 语义跨会话成立；⑤看门狗/控制器杀 bot pid 前增加"node.exe + 命令行含 bot.cjs"双验证，防 pid 复用误杀
+- v1.5 2026-09-20 实装后修订（已上线）：①活跃度调优——候选门槛 6 条→**2 条**、静默 45s→**20s**、冷却上限 120s→**60s**（Four 反馈"太不活跃"，config.json 现行值为准）；②人设定稿——21 岁湖北男大，语料 神了/难绷/乐/寄/6/彳亍/牛的/笑死我了/蹲一个/何意味，禁用 草/麻了/啊这/hhh，删课程梗；③tray.ps1 v2 改 AttachConsole 定位（§8）；④`llm.maxTokens` 300→**10000**（Four 拍板）——300 会被 V4.1 Flash 的思考 token 吃光，导致 `空响应(finish=length)`（实测 7 次）；max_tokens 是上限不是消费，计费按实际 token；⑤README 重写为新架构（旧版仍述 ACP）
