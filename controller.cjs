@@ -2,6 +2,7 @@
 /* controller.cjs — QQ 机器人 CLI 控制器（计划 §6）
  * 命令: start / stop / restart / status / log / err / tray / help / quit
  * 单实例: TCP 3211 互斥锁；点 X 关闭 = stop（由 watchdog.ps1 兜底）
+ * 存活监控: 每 60s 探测 OneBot，连续 3 次失败自动重启 NapCat 层（v1.8）
  */
 const net = require('net');
 const fs = require('fs');
@@ -35,6 +36,12 @@ function spawnHidden(file, args) {
 function readStatus() {
   try { return JSON.parse(fs.readFileSync(STATUS_PATH, 'utf8')); } catch { return null; }
 }
+function webuiUrl() {
+  try {
+    const w = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'webui.json'), 'utf8'));
+    return `http://127.0.0.1:${w.port || 6099}${w.prefix || '/webui'}?token=${w.token}`;
+  } catch { return '(读取 config\\webui.json 失败)'; }
+}
 
 // pid 复用防护：杀前必须验证是 node.exe 且命令行含 bot.cjs（计划 v1.4 修订⑤）
 function botProcess() {
@@ -65,6 +72,96 @@ function killNapCat() {
   ps(`Stop-Process -Name NapCatWinBootMain,QQ,QQEX -Force -ErrorAction SilentlyContinue`);
 }
 
+// ---------- 存活监控（v1.8：失联自动报警 + 自动重启 NapCat 层） ----------
+// 背景：QQ 反作弊/Tencent 风控会不定时杀掉或踢下线 NapCat 注入的 QQ 实例（2026-09-21 一天两次），
+// 进程层看不出异常，只有 OneBot :3000 会失联。此处周期性探测 get_login_info。
+const MON_INTERVAL_MS = 60 * 1000;        // 每 60s 探测一次
+const MON_FAIL_LIMIT = 3;                 // 连续 3 次失败 = 确认失联
+const MON_MAX_RESTARTS = 3;               // 30 分钟内最多自动重启 3 次（防抖动死循环）
+const MON_RESTART_WINDOW_MS = 30 * 60 * 1000;
+const MON_MAX_OFFLINE_NAGS = 3;           // 从未登录成功时的扫码提醒次数上限
+
+let monTimer = null;
+let monFails = 0;
+let monSeenOnline = false;   // 见过在线才允许自动重启（避免杀掉正在扫码登录的 QQ）
+let monRestarts = [];        // 自动重启时间戳（30min 滑动窗口）
+let monOfflineNags = 0;
+let monBusy = false;         // 防重入（自动重启期间暂停探测）
+
+async function napcatAlive() {
+  try {
+    const res = await fetch('http://127.0.0.1:3000/get_login_info', { signal: AbortSignal.timeout(5000) });
+    const j = await res.json();
+    return j.status === 'ok';
+  } catch { return false; }
+}
+function beep(n) { for (let i = 0; i < n; i++) setTimeout(() => process.stdout.write('\x07'), i * 400); }
+
+function startMonitor() {
+  if (monTimer) return;
+  monTimer = setInterval(monTick, MON_INTERVAL_MS);
+  console.log('[监控] 存活监控已开启（每 60s 探测，确认失联后自动重启 NapCat 层）');
+}
+function stopMonitor() {
+  if (monTimer) { clearInterval(monTimer); monTimer = null; }
+  monFails = 0; monSeenOnline = false; monRestarts = []; monOfflineNags = 0;
+}
+
+async function monTick() {
+  if (monBusy) return;
+  monBusy = true;
+  try {
+    if (await napcatAlive()) {
+      if (monFails > 0 || !monSeenOnline) console.log('\n[监控] NapCat 在线 ✓');
+      monFails = 0; monSeenOnline = true; monOfflineNags = 0;
+      return;
+    }
+    monFails++;
+    console.log(`\n[监控] OneBot 探测失败 (${monFails}/${MON_FAIL_LIMIT}) ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+    if (monFails < MON_FAIL_LIMIT) return;
+    monFails = 0;
+    if (!monSeenOnline) {
+      if (monOfflineNags < MON_MAX_OFFLINE_NAGS) {
+        monOfflineNags++;
+        beep(3);
+        console.log('[监控] NapCat 一直未上线，不自动重启（可能正在扫码/登录被拒）。调试界面: ' + webuiUrl());
+      }
+      return;
+    }
+    const now = Date.now();
+    monRestarts = monRestarts.filter(t => now - t < MON_RESTART_WINDOW_MS);
+    if (monRestarts.length >= MON_MAX_RESTARTS) {
+      beep(6);
+      console.log('[监控] 30 分钟内已自动重启 3 次仍未恢复，停止自动重启！请人工处理: ' + webuiUrl());
+      return;
+    }
+    monRestarts.push(now);
+    beep(4);
+    console.log('[监控] 确认失联，自动重启 NapCat 层（所有 QQ 进程将被关闭，含主号）...');
+    await restartNapCatLayer();
+  } finally { monBusy = false; }
+}
+
+async function restartNapCatLayer() {
+  killNapCat();
+  await new Promise(r => setTimeout(r, 2000));
+  let qq = '';
+  try { qq = String(JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).botQQ || ''); } catch {}
+  spawnHidden('cmd', qq ? `'/c','launcher-user.bat','${qq}'` : `'/c','launcher-user.bat'`);
+  console.log('[监控] NapCat 已重新拉起，等待上线（最长 90s）...');
+  for (let i = 0; i < 18; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    if (await napcatAlive()) {
+      console.log('[监控] NapCat 已自动恢复上线 ✓');
+      monSeenOnline = true;
+      return true;
+    }
+  }
+  beep(6);
+  console.log('[监控] 重启后 90s 仍未上线，可能需要扫码重登: ' + webuiUrl());
+  return false;
+}
+
 // ---------- 命令 ----------
 async function cmdStart() {
   if (botProcess()) { console.log('[启动] 机器人已在运行（bot.cjs 存活）'); armWatchdog(); return; }
@@ -91,16 +188,22 @@ async function cmdStart() {
       const j = await res.json();
       if (j.status === 'ok') {
         console.log(`[启动] NapCat 已上线：${j.data.nickname} (${j.data.user_id})`);
+        console.log(`[启动] NapCat 调试界面: ${webuiUrl()}`);
         console.log('[启动] 完成。输入 status 查看状态，tray 最小化到托盘。');
+        monSeenOnline = true;
+        startMonitor();
         return;
       }
     } catch {}
   }
   console.log('[启动] 警告：60s 内 NapCat 未响应，可能还在登录。稍后用 status 复查。');
+  console.log(`[启动] 可打开调试界面查看登录/报错: ${webuiUrl()}`);
+  startMonitor(); // 未见过在线：监控只提醒扫码，不自动重启
 }
 
 async function cmdStop() {
   disarmWatchdog(); // 主动停止后，控制器再退出时看门狗无需动手
+  stopMonitor();
   const pid = botProcess();
   if (pid) {
     ps(`Stop-Process -Id ${pid} -Force`);
@@ -129,6 +232,7 @@ async function cmdStatus() {
   console.log('──────── 状态 ────────');
   console.log(`bot 进程:   ${botAlive ? `运行中 (pid ${st.pid})` : '未运行'}`);
   console.log(`NapCat:     ${napcat ? '运行中' : '未运行'}`);
+  console.log(`存活监控:   ${monTimer ? `运行中（每 ${MON_INTERVAL_MS / 1000}s 探测）` : '未开启'}`);
   if (botAlive && st) {
     const ago = ts => ts ? `${Math.round((Date.now() - ts) / 1000)}s 前` : '—';
     console.log(`模式:       ${st.muted ? '已闭嘴' : ['正常', '候选减半(预算)', '仅@必回(护栏)'][st.guard || 0]}`);
@@ -230,6 +334,7 @@ async function main() {
   if (botProcess() || napcatRunning()) {
     console.log('[检测] 发现机器人/NapCat 正在运行（上次保留的），已接管。');
     armWatchdog();
+    startMonitor();
   }
 
   rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'bot> ' });
