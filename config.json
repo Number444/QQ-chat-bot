@@ -19,7 +19,16 @@
     "reasoningEffort": "max",
     "timeoutMs": 30000,
     "failoverAfter": 3,
-    "backoffMs": [10000, 60000, 300000]
+    "backoffMs": [10000, 60000, 300000],
+    "models": {
+      "kimi-k3": {
+        "provider": "anthropic",
+        "endpoint": "https://api.kimi.com/coding/v1/messages",
+        "model": "k3-256k",
+        "keyRef": "kimiCodeKey",
+        "thinkingEffort": "low"
+      }
+    }
   },
 
   "behavior": {
@@ -49,7 +58,8 @@
     "dailyCallCap": 200,
     "pricePer1M": {
       "deepseek-v4.1-flash": { "inOffPeak": 0.15, "inPeak": 0.30, "outOffPeak": 0.60, "outPeak": 1.20, "cacheRead": 0.003 },
-      "longcat-2.0": { "in": 0.30, "out": 1.20, "cacheRead": 0.006 }
+      "longcat-2.0": { "in": 0.30, "out": 1.20, "cacheRead": 0.006 },
+      "kimi-k3": { "in": 0, "out": 0, "cacheRead": 0 }
     },
     "peakHoursUTC": [[1, 4], [6, 10]]
   },

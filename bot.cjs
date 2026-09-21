@@ -87,6 +87,11 @@ const runtime = {
   atCount: new Map(),    // userId → [ts,...]（@ 限流）
   atMuted: new Map(),    // userId → untilTs
 };
+// /模型 命令切换的模型持久化在 ctx.modelOverride，重启后恢复
+if (ctx.modelOverride && (ctx.modelOverride === cfg.llm.primary || ctx.modelOverride === cfg.llm.fallback
+  || (cfg.llm.models && cfg.llm.models[ctx.modelOverride]))) {
+  runtime.activeModel = ctx.modelOverride;
+}
 
 // ---------- 发送存档（logs/sent/YYYY-MM-DD.jsonl）----------
 function archiveSent(entry) {
@@ -234,7 +239,62 @@ function parseCQString(str) {
 }
 
 // ---------- LLM 调用 ----------
+// Anthropic Messages 格式的模型（如 kimi-k3，注册在 cfg.llm.models）
+async function llmCallAnthropic(prof, messages) {
+  const key = secrets[prof.keyRef] || '';
+  if (!key) { L.err(`模型 ${runtime.activeModel} 缺 key（secrets.json 需有 ${prof.keyRef}）`); return null; }
+  const sys = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+  const body = {
+    model: prof.model,
+    max_tokens: cfg.llm.maxTokens,
+    messages: messages.filter(m => m.role !== 'system'),
+  };
+  if (sys) body.system = sys;
+  if (prof.thinkingEffort) {
+    body.thinking = { type: 'adaptive' };
+    body.output_config = { effort: prof.thinkingEffort };
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      const wait = cfg.llm.backoffMs[attempt - 1] || 300000;
+      L.warn(`LLM 重试 #${attempt}，等待 ${wait / 1000}s`);
+      await sleep(wait);
+    }
+    try {
+      const res = await fetch(prof.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'User-Agent': 'qq-persona-bot/1.0',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Math.max(cfg.llm.timeoutMs, 90000)), // kimi 首 token 较慢，放宽到 90s
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+      }
+      const j = await res.json();
+      recordCall(runtime.activeModel, j.usage ? { prompt_tokens: j.usage.input_tokens, completion_tokens: j.usage.output_tokens } : null);
+      runtime.consecFails = 0;
+      runtime.lastError = '';
+      const content = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      if (!content) throw new Error(`空响应(stop=${j.stop_reason})`);
+      return content;
+    } catch (e) {
+      L.err(`LLM 调用失败(${runtime.activeModel}): ${e.message}`);
+      runtime.consecFails++;
+      runtime.lastError = e.message;
+    }
+  }
+  return null;
+}
+
 async function llmCall(messages, { jsonMode = true } = {}) {
+  const prof = cfg.llm.models && cfg.llm.models[runtime.activeModel];
+  if (prof && prof.provider === 'anthropic') return llmCallAnthropic(prof, messages);
   const body = {
     model: runtime.activeModel,
     messages,
@@ -599,8 +659,24 @@ async function onMasterPrivate(ev) {
     const idx = memeIndex();
     const recent = idx.memes.slice(-10).map(m => `${m.file} (${m.meaning})`).join('\n') || '（空）';
     await sendPrivate(ev.user_id, `表情库共 ${idx.memes.length} 个，最近入库：\n${recent}`);
+  } else if (text === '/模型' || text.startsWith('/模型 ')) {
+    const arg = text.slice(3).trim();
+    const avail = [cfg.llm.primary, cfg.llm.fallback, ...Object.keys(cfg.llm.models || {})];
+    if (!arg) {
+      await sendPrivate(ev.user_id, `当前模型: ${runtime.activeModel}\n可用: ${avail.join(' / ')}\n切换: /模型 <名>（重启后保持）`);
+    } else {
+      const hit = avail.find(m => m === arg) || avail.find(m => m.toLowerCase().includes(arg.toLowerCase()));
+      if (!hit) {
+        await sendPrivate(ev.user_id, `没认出来 "${arg}"。可用: ${avail.join(' / ')}`);
+      } else {
+        runtime.activeModel = hit;
+        runtime.consecFails = 0;
+        ctx.modelOverride = hit; saveJSON(CTX_PATH, ctx);
+        await sendPrivate(ev.user_id, hit === cfg.llm.primary ? `已切到 ${hit}（主模型）` : `已切到 ${hit}`);
+      }
+    }
   } else {
-    await sendPrivate(ev.user_id, '命令: /闭嘴 /说话 /状态 /重载 /人设 /表情');
+    await sendPrivate(ev.user_id, '命令: /闭嘴 /说话 /状态 /重载 /人设 /表情 /模型');
   }
 }
 
