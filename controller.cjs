@@ -42,6 +42,20 @@ function webuiUrl() {
     return `http://127.0.0.1:${w.port || 6099}${w.prefix || '/webui'}?token=${w.token}`;
   } catch { return '(读取 config\\webui.json 失败)'; }
 }
+function openBrowser(url) {
+  spawnHidden('cmd', `'/c','start','""','"${url}"'`);
+}
+// 从 NapCat 最新 fileLog 里捞二维码直链（v1.8 已开 fileLog）
+function qrUrlFromLog() {
+  try {
+    const dir = path.join(ROOT, 'logs');
+    const f = fs.readdirSync(dir).filter(n => /^\d{4}-\d{2}-\d{2}.*\.log$/.test(n))
+      .map(n => ({ n, t: fs.statSync(path.join(dir, n)).mtimeMs })).sort((a, b) => b.t - a.t)[0];
+    if (!f) return null;
+    const m = fs.readFileSync(path.join(dir, f.n), 'utf8').match(/https:\/\/ssl\.ptlogin2\.qq\.com\/[^\s"']+/);
+    return m ? m[0] : null;
+  } catch { return null; }
+}
 
 // pid 复用防护：杀前必须验证是 node.exe 且命令行含 bot.cjs（计划 v1.4 修订⑤）
 function botProcess() {
@@ -95,7 +109,20 @@ async function napcatAlive() {
     return j.status === 'ok';
   } catch { return false; }
 }
-function beep(n) { for (let i = 0; i < n; i++) setTimeout(() => process.stdout.write('\x07'), i * 400); }
+function xmlEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// Win11 原生 Toast 通知（替代响铃）。EncodedCommand 传 UTF-16LE base64，避开中文/引号转义问题
+function notify(title, text) {
+  const script = [
+    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null',
+    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] > $null',
+    '$x = New-Object Windows.Data.Xml.Dom.XmlDocument',
+    `$x.LoadXml('<toast><visual><binding template="ToastGeneric"><text>${xmlEsc(title)}</text><text>${xmlEsc(text)}</text></binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>')`,
+    '$t = [Windows.UI.Notifications.ToastNotification]::new($x)',
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($t)",
+  ].join('\n');
+  const p = spawn('powershell', ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { stdio: 'ignore', windowsHide: true });
+  p.on('error', () => {});
+}
 
 function startMonitor() {
   if (monTimer) return;
@@ -123,20 +150,22 @@ async function monTick() {
     if (!monSeenOnline) {
       if (monOfflineNags < MON_MAX_OFFLINE_NAGS) {
         monOfflineNags++;
-        beep(3);
+        notify('QQ 机器人监控', 'NapCat 一直未上线，可能需要扫码登录（已打开浏览器）');
         console.log('[监控] NapCat 一直未上线，不自动重启（可能正在扫码/登录被拒）。调试界面: ' + webuiUrl());
+        if (monOfflineNags === 1) openBrowser(webuiUrl()); // 第一次提醒时顺手打开浏览器
       }
       return;
     }
     const now = Date.now();
     monRestarts = monRestarts.filter(t => now - t < MON_RESTART_WINDOW_MS);
     if (monRestarts.length >= MON_MAX_RESTARTS) {
-      beep(6);
+      notify('QQ 机器人监控', 'NapCat 自动重启 3 次均失败，请人工处理（已打开登录页）');
       console.log('[监控] 30 分钟内已自动重启 3 次仍未恢复，停止自动重启！请人工处理: ' + webuiUrl());
+      openBrowser(webuiUrl());
       return;
     }
     monRestarts.push(now);
-    beep(4);
+    notify('QQ 机器人监控', 'NapCat 失联，正在自动重启…');
     console.log('[监控] 确认失联，自动重启 NapCat 层（所有 QQ 进程将被关闭，含主号）...');
     await restartNapCatLayer();
   } finally { monBusy = false; }
@@ -153,12 +182,15 @@ async function restartNapCatLayer() {
     await new Promise(r => setTimeout(r, 5000));
     if (await napcatAlive()) {
       console.log('[监控] NapCat 已自动恢复上线 ✓');
+      notify('QQ 机器人监控', 'NapCat 已自动恢复上线 ✓');
       monSeenOnline = true;
       return true;
     }
   }
-  beep(6);
+  notify('QQ 机器人监控', 'NapCat 重启后 90s 仍未上线，大概率需要扫码重登');
   console.log('[监控] 重启后 90s 仍未上线，可能需要扫码重登: ' + webuiUrl());
+  const qr = qrUrlFromLog();
+  if (qr) console.log('[监控] 二维码直链: ' + qr);
   return false;
 }
 
@@ -174,6 +206,7 @@ async function cmdStart() {
 
   console.log('[启动] 拉起 NapCat（隐藏窗口）...');
   spawnHidden('cmd', `'/c','launcher-user.bat'`);
+  console.log(`[启动] NapCat 管理界面: ${webuiUrl()}`);
 
   console.log('[启动] 拉起 bot.cjs（隐藏进程）...');
   spawnHidden(process.execPath, `'"${BOT}"'`);
@@ -197,7 +230,10 @@ async function cmdStart() {
     } catch {}
   }
   console.log('[启动] 警告：60s 内 NapCat 未响应，可能还在登录。稍后用 status 复查。');
-  console.log(`[启动] 可打开调试界面查看登录/报错: ${webuiUrl()}`);
+  console.log(`[启动] 登录/管理界面: ${webuiUrl()}（二维码在此页，已自动打开浏览器）`);
+  const qr = qrUrlFromLog();
+  if (qr) console.log(`[启动] 二维码直链: ${qr}`);
+  openBrowser(webuiUrl());
   startMonitor(); // 未见过在线：监控只提醒扫码，不自动重启
 }
 

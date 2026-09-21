@@ -16,6 +16,7 @@
     "session": "qq-group-985100027",
     "temperature": 0.9,
     "maxTokens": 10000,
+    "reasoningEffort": "max",
     "timeoutMs": 30000,
     "failoverAfter": 3,
     "backoffMs": [10000, 60000, 300000]

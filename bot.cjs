@@ -241,6 +241,10 @@ async function llmCall(messages, { jsonMode = true } = {}) {
     temperature: cfg.llm.temperature,
     max_tokens: cfg.llm.maxTokens,
   };
+  // 思考强度仅应用于主模型（fallback 兼容性未验证，保持默认）
+  if (cfg.llm.reasoningEffort && runtime.activeModel === cfg.llm.primary) {
+    body.reasoning_effort = cfg.llm.reasoningEffort;
+  }
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) {
@@ -279,6 +283,7 @@ async function llmCall(messages, { jsonMode = true } = {}) {
       if (runtime.consecFails >= cfg.llm.failoverAfter && runtime.activeModel === cfg.llm.primary) {
         runtime.activeModel = cfg.llm.fallback;
         body.model = runtime.activeModel;
+        delete body.reasoning_effort; // fallback 模型不接受思考强度参数
         L.warn(`连续失败 ${runtime.consecFails} 次，切换到 fallback 模型 ${runtime.activeModel}`);
       }
     }
