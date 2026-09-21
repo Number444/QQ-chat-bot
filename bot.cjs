@@ -624,12 +624,12 @@ function writeStatus() {
 
 // ---------- Webhook ----------
 const server = http.createServer((req, res) => {
-  if (req.method !== 'POST') { res.statusCode = 200; res.end('ok'); return; }
+  if (req.method !== 'POST') { res.statusCode = 200; res.end('{}'); return; }
   let body = '';
   req.on('data', c => { body += c; if (body.length > 5e6) req.destroy(); });
   req.on('end', () => {
     res.statusCode = 200;
-    res.end('ok');
+    res.end('{}');
     let ev;
     try { ev = JSON.parse(body); } catch { return; }
     try {

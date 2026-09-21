@@ -61,4 +61,4 @@ Get-NetTCPConnection -State Listen -LocalPort 3210        # bot webhook 在听
 ## 注意
 
 - 白名单 git：只跟踪代码/文档/脚本；NapCat 二进制、`secrets.json`、`state/`、日志、`memes/` 一律忽略
-- 机器人号 IV（2721212523）与本机 NapCat 绑定；**不要在第二台电脑登录该号**（会踢掉 NapCat），手机 QQ 双登无影响
+- 机器人号 IV（3776580862）与本机 NapCat 绑定；**不要在第二台电脑登录该号**（会踢掉 NapCat），手机 QQ 双登无影响
