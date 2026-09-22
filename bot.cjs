@@ -63,7 +63,8 @@ function loadJSON(file, fallback) {
 }
 
 // ---------- 运行时状态 ----------
-const ctx = loadJSON(CTX_PATH, { buffer: [], summary: '', sinceSummary: 0, recentOwn: [], sentIds: [] });
+const ctx = loadJSON(CTX_PATH, { buffer: [], summary: '', sinceSummary: 0, recentOwn: [], sentIds: [], recentImages: [] });
+if (!Array.isArray(ctx.recentImages)) ctx.recentImages = []; // 图片滚动窗口（最近 N 张，仅多模态模型使用）
 ctx.buffer = ctx.buffer || [];
 ctx.recentOwn = ctx.recentOwn || [];
 ctx.sentIds = ctx.sentIds || [];
@@ -367,6 +368,25 @@ async function downloadBuffer(url) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
+// 当前模型是否 Anthropic Messages 格式（图片块结构不同）
+function isAnthropicActive() {
+  const p = cfg.llm.models && cfg.llm.models[runtime.activeModel];
+  return !!(p && p.provider === 'anthropic');
+}
+function detectMediaType(buf) {
+  if (buf.length > 2 && buf[0] === 0xFF && buf[1] === 0xD8) return 'image/jpeg';
+  if (buf.length > 2 && buf[0] === 0x89 && buf[1] === 0x50) return 'image/png';
+  if (buf.length > 2 && buf[0] === 0x47 && buf[1] === 0x49) return 'image/gif';
+  if (buf.length > 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return 'image/jpeg';
+}
+// 按当前模型格式构造图片 content block
+function imageBlock(buf) {
+  if (isAnthropicActive()) {
+    return { type: 'image', source: { type: 'base64', media_type: detectMediaType(buf), data: buf.toString('base64') } };
+  }
+  return { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${buf.toString('base64')}` } };
+}
 function slugify(s) {
   return String(s).replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 20) || 'meme';
 }
@@ -380,10 +400,9 @@ async function tagAndStoreImage(url) {
   const idx = memeIndex();
   if (idx.memes.some(m => m.md5 === md5)) return; // 已有
 
-  const b64 = buf.toString('base64');
   const tagPrompt = [
     { type: 'text', text: '看这张群聊图片，只回复 JSON：{"isMeme":是否表情包(带梗/可拿来聊天的图),"meaning":"含义≤10字","emotions":["情绪标签"],"sensitive":是否涉黄涉政敏感}。普通照片/截图不算表情包。' },
-    { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } },
+    imageBlock(buf), // 按当前模型格式（OpenAI image_url / Anthropic base64 image）
   ];
   let result = null;
   try {
@@ -441,6 +460,10 @@ function pushBuffer(ev, parsed) {
   armSilenceTimer();
   // 异步攒表情（不阻塞）
   for (const img of parsed.images) tagAndStoreImage(img.url).catch(() => {});
+  // 图片滚动窗口：最近 N 张，决策时发给多模态模型
+  const imgWin = (cfg.behavior && cfg.behavior.imageWindowSize) || 10;
+  for (const img of parsed.images) ctx.recentImages.push({ ts: ev.time * 1000 || Date.now(), nick, url: img.url });
+  if (ctx.recentImages.length > imgWin) ctx.recentImages = ctx.recentImages.slice(-imgWin);
   // 滚动摘要
   if (ctx.sinceSummary >= cfg.behavior.summaryEvery) {
     ctx.sinceSummary = 0;
@@ -545,10 +568,24 @@ async function decideAndMaybeReply(hint, { force = false } = {}) {
       ctx.summary || '（空）',
     ].join('\n');
     const recent = ctx.recentOwn.slice(-10).join(' / ') || '（无）';
-    const user = `最近群聊：\n'''\n${bufferText()}\n'''\n\n你最近说过的（别复读）：${recent}\n\n提示：${hint}`;
+    const userText = `最近群聊：\n'''\n${bufferText()}\n'''\n\n你最近说过的（别复读）：${recent}\n\n提示：${hint}`;
+    // 图片滚动窗口：仅 Anthropic 格式模型（kimi-k3）附带，文字模型保持原样
+    let userContent = userText;
+    if (isAnthropicActive() && ctx.recentImages.length) {
+      const blocks = [];
+      for (const im of ctx.recentImages) {
+        try {
+          const buf = await downloadBuffer(im.url);
+          if (buf.length > 3.5 * 1024 * 1024) { L.debug('图片过大，跳过'); continue; }
+          blocks.push({ type: 'text', text: `（${im.nick} 发的图）` });
+          blocks.push(imageBlock(buf));
+        } catch { L.debug('窗口图片下载失败（可能已过期），跳过'); }
+      }
+      if (blocks.length) userContent = [{ type: 'text', text: userText }, ...blocks];
+    }
     const content = await llmCall([
       { role: 'system', content: sys },
-      { role: 'user', content: user },
+      { role: 'user', content: userContent },
     ]);
     const j = content && extractJSON(content);
     if (!j || j.action !== 'reply' || !Array.isArray(j.bubbles) || !j.bubbles.length) {

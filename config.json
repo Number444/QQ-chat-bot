@@ -48,7 +48,8 @@
     "bubbleMaxChars": 40,
     "dedupWindowMs": 300000,
     "atThrottlePerPerson": 10,
-    "atThrottleWindowMs": 1800000
+    "atThrottleWindowMs": 1800000,
+    "imageWindowSize": 10
   },
 
   "cost": {
