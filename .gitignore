@@ -1,4 +1,4 @@
-# NapCat 二进制/运行时一律不入库，只跟踪机器人本体（白名单制）
+# SnowLuma 二进制/运行时一律不入库，只跟踪机器人本体（白名单制）
 # secrets.json / state/ / logs/ / memes/ / bot.log 天然被 * 排除，切勿加白名单
 *
 !.gitignore
@@ -13,3 +13,4 @@
 !watchdog.ps1
 !tray.ps1
 !KillQQ.bat
+!启动QQ机器人.bat
